@@ -1,0 +1,163 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  NT548 Lab 01 - Root stack (CloudFormation Nested Stacks).
+  Ghép các module: VPC -> NAT Gateway -> Route Tables -> Security Groups -> EC2.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: "Network" }
+        Parameters: [VpcCidr, PublicSubnetCidr, PrivateSubnetCidr]
+      - Label: { default: "Security" }
+        Parameters: [AllowedSshCidr, KeyName]
+      - Label: { default: "Compute" }
+        Parameters: [InstanceType, LatestAmiId]
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: nt548-lab01-cfn
+  VpcCidr:
+    Type: String
+    Default: 10.10.0.0/16
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.10.1.0/24
+  PrivateSubnetCidr:
+    Type: String
+    Default: 10.10.2.0/24
+  AllowedSshCidr:
+    Type: String
+    Description: IP của bạn dạng x.x.x.x/32 (curl -s https://checkip.amazonaws.com)
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(3[0-2]|[12]?\d)$'
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: vockey
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t2.micro, t2.small, t3.micro, t3.small, t3.medium]
+  LatestAmiId:
+    Description: Amazon Linux 2023 mới nhất (lấy từ SSM Parameter Store)
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Rules:
+  DenyOpenSsh:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AllowedSshCidr, "0.0.0.0/0"]]
+        AssertDescription: AllowedSshCidr KHÔNG được là 0.0.0.0/0
+
+Resources:
+  # 1. VPC + Subnets + IGW + Default SG
+  VpcStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/vpc.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcCidr: !Ref VpcCidr
+        PublicSubnetCidr: !Ref PublicSubnetCidr
+        PrivateSubnetCidr: !Ref PrivateSubnetCidr
+
+  # 2. NAT Gateway
+  NatGatewayStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/nat-gateway.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        PublicSubnetId: !GetAtt VpcStack.Outputs.PublicSubnetId
+
+  # 3. Route Tables
+  RouteTablesStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/route-tables.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        InternetGatewayId: !GetAtt VpcStack.Outputs.InternetGatewayId
+        NatGatewayId: !GetAtt NatGatewayStack.Outputs.NatGatewayId
+        PublicSubnetId: !GetAtt VpcStack.Outputs.PublicSubnetId
+        PrivateSubnetId: !GetAtt VpcStack.Outputs.PrivateSubnetId
+
+  # 4. Security Groups
+  SecurityGroupsStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: ./modules/security-groups.yaml
+      Parameters:
+        ProjectName: !Ref ProjectName
+        VpcId: !GetAtt VpcStack.Outputs.VpcId
+        AllowedSshCidr: !Ref AllowedSshCidr
+
+  # 5a. Public EC2 (bastion)
+  PublicEc2Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: RouteTablesStack
+    Properties:
+      TemplateURL: ./modules/ec2.yaml
+      Parameters:
+        InstanceName: !Sub "${ProjectName}-public-ec2"
+        Role: public
+        AmiId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        SubnetId: !GetAtt VpcStack.Outputs.PublicSubnetId
+        SecurityGroupId: !GetAtt SecurityGroupsStack.Outputs.PublicEc2SecurityGroupId
+        KeyName: !Ref KeyName
+        AssociatePublicIp: "true"
+
+  # 5b. Private EC2
+  PrivateEc2Stack:
+    Type: AWS::CloudFormation::Stack
+    DependsOn: RouteTablesStack
+    Properties:
+      TemplateURL: ./modules/ec2.yaml
+      Parameters:
+        InstanceName: !Sub "${ProjectName}-private-ec2"
+        Role: private
+        AmiId: !Ref LatestAmiId
+        InstanceType: !Ref InstanceType
+        SubnetId: !GetAtt VpcStack.Outputs.PrivateSubnetId
+        SecurityGroupId: !GetAtt SecurityGroupsStack.Outputs.PrivateEc2SecurityGroupId
+        KeyName: !Ref KeyName
+        AssociatePublicIp: "false"
+
+Outputs:
+  VpcId:
+    Value: !GetAtt VpcStack.Outputs.VpcId
+  PublicSubnetId:
+    Value: !GetAtt VpcStack.Outputs.PublicSubnetId
+  PrivateSubnetId:
+    Value: !GetAtt VpcStack.Outputs.PrivateSubnetId
+  InternetGatewayId:
+    Value: !GetAtt VpcStack.Outputs.InternetGatewayId
+  DefaultSecurityGroupId:
+    Value: !GetAtt VpcStack.Outputs.DefaultSecurityGroupId
+  NatGatewayId:
+    Value: !GetAtt NatGatewayStack.Outputs.NatGatewayId
+  NatPublicIp:
+    Value: !GetAtt NatGatewayStack.Outputs.NatPublicIp
+  PublicRouteTableId:
+    Value: !GetAtt RouteTablesStack.Outputs.PublicRouteTableId
+  PrivateRouteTableId:
+    Value: !GetAtt RouteTablesStack.Outputs.PrivateRouteTableId
+  PublicEc2SecurityGroupId:
+    Value: !GetAtt SecurityGroupsStack.Outputs.PublicEc2SecurityGroupId
+  PrivateEc2SecurityGroupId:
+    Value: !GetAtt SecurityGroupsStack.Outputs.PrivateEc2SecurityGroupId
+  PublicInstanceId:
+    Value: !GetAtt PublicEc2Stack.Outputs.InstanceId
+  PublicInstancePublicIp:
+    Value: !GetAtt PublicEc2Stack.Outputs.PublicIp
+  PrivateInstanceId:
+    Value: !GetAtt PrivateEc2Stack.Outputs.InstanceId
+  PrivateInstancePrivateIp:
+    Value: !GetAtt PrivateEc2Stack.Outputs.PrivateIp
+  AllowedSshCidr:
+    Value: !Ref AllowedSshCidr
+  SshPublicCommand:
+    Value: !Sub
+      - "ssh -i ~/.ssh/labsuser.pem ec2-user@${Ip}"
+      - Ip: !GetAtt PublicEc2Stack.Outputs.PublicIp
