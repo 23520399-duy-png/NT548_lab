@@ -16,7 +16,7 @@ override.tf.json
 terraform.rc
 
 # CloudFormation build output
-cloudformation/build/
+**/cloudformation/build/
 
 # Secrets
 *.pem
