@@ -20,7 +20,7 @@ output "default_security_group_id" {
 
 output "flow_logs_bucket" {
   description = "S3 bucket chứa VPC Flow Logs"
-  value       = var.enable_flow_logs ? module.flow_logs_bucket[0].bucket_name : null
+  value       = var.enable_flow_logs ? local.flow_logs_bucket_name : null
 }
 
 output "flow_log_id" {

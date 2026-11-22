@@ -32,16 +32,31 @@ data "aws_ami" "al2023" {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
 locals {
   name   = var.project_name
   ami_id = var.ami_id != "" ? var.ami_id : data.aws_ami.al2023.id
   azs    = slice(data.aws_availability_zones.available.names, 0, 2)
+
+  # Bucket nhận VPC Flow Logs. Mặc định: <project>-flowlogs-<account>-<region>,
+  # được tạo sẵn bằng scripts/bootstrap-backend.sh (AWS CLI).
+  flow_logs_bucket_name = (
+    var.create_flow_logs_bucket ? module.flow_logs_bucket[0].bucket_name :
+    var.flow_logs_bucket_name != "" ? var.flow_logs_bucket_name :
+    "${local.name}-flowlogs-${data.aws_caller_identity.current.account_id}-${var.aws_region}"
+  )
+  flow_logs_bucket_arn = "arn:aws:s3:::${local.flow_logs_bucket_name}"
 }
 
-# 0. S3 bucket chứa VPC Flow Logs (Checkov CKV2_AWS_11)
+# 0. (Tuỳ chọn) S3 bucket chứa VPC Flow Logs do Terraform tạo.
+# Mặc định TẮT: AWS Academy chặn s3:GetBucketObjectLockConfiguration bằng
+# Service Control Policy, mà AWS provider luôn gọi API này khi đọc aws_s3_bucket
+# -> apply lỗi AccessDenied. Trên tài khoản AWS thường đặt
+# create_flow_logs_bucket = true để Terraform tự quản lý bucket.
 module "flow_logs_bucket" {
   source = "./modules/flow_logs_bucket"
-  count  = var.enable_flow_logs ? 1 : 0
+  count  = var.enable_flow_logs && var.create_flow_logs_bucket ? 1 : 0
 
   name           = local.name
   retention_days = var.flow_logs_retention_days
@@ -57,7 +72,7 @@ module "vpc" {
   private_subnet_cidrs = var.private_subnet_cidrs
   azs                  = local.azs
   enable_flow_logs     = var.enable_flow_logs
-  flow_logs_bucket_arn = var.enable_flow_logs ? module.flow_logs_bucket[0].bucket_arn : null
+  flow_logs_bucket_arn = var.enable_flow_logs ? local.flow_logs_bucket_arn : null
 }
 
 # 2. NAT Gateway (đặt ở Public Subnet đầu tiên).

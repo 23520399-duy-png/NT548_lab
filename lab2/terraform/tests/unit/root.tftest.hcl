@@ -18,8 +18,7 @@ mock_provider "aws" {
     }
   }
 
-  # Giá trị giả cho data source nằm trong module flow_logs_bucket (module có
-  # count nên override_data theo địa chỉ không áp dụng được trên Terraform)
+  # Giá trị giả cho data source tài khoản/region (dùng để đặt tên bucket)
   mock_data "aws_caller_identity" {
     defaults = {
       account_id = "123456789012"
@@ -78,12 +77,12 @@ run "tc06_full_stack_wiring" {
   }
 
   assert {
-    condition     = length(module.flow_logs_bucket) == 1 && module.vpc.flow_log_traffic_type == "ALL"
-    error_message = "VPC Flow Logs phải được bật mặc định"
+    condition     = length(module.flow_logs_bucket) == 0 && module.vpc.flow_log_traffic_type == "ALL"
+    error_message = "VPC Flow Logs phải được bật mặc định, ghi vào bucket có sẵn (không tạo bucket bằng Terraform)"
   }
 
   assert {
-    condition     = module.flow_logs_bucket[0].bucket_name == "nt548-lab02-flowlogs-123456789012-us-east-1"
+    condition     = output.flow_logs_bucket == "nt548-lab02-flowlogs-123456789012-us-east-1"
     error_message = "Tên bucket Flow Logs phải theo mẫu <project>-flowlogs-<account>-<region>"
   }
 
@@ -102,7 +101,35 @@ run "tc06b_flow_logs_disabled" {
   }
 
   assert {
-    condition     = length(module.flow_logs_bucket) == 0 && module.vpc.flow_log_id == null
+    condition     = module.vpc.flow_log_id == null && output.flow_logs_bucket == null
     error_message = "enable_flow_logs = false thì không tạo Flow Logs"
+  }
+}
+
+# TC-06c: Tài khoản AWS thường – Terraform tự tạo bucket Flow Logs
+run "tc06c_create_flow_logs_bucket" {
+  command = plan
+
+  variables {
+    create_flow_logs_bucket = true
+  }
+
+  assert {
+    condition     = length(module.flow_logs_bucket) == 1
+    error_message = "create_flow_logs_bucket = true thì phải tạo bucket bằng module"
+  }
+}
+
+# TC-06d: Chỉ định tên bucket có sẵn
+run "tc06d_existing_bucket_name" {
+  command = plan
+
+  variables {
+    flow_logs_bucket_name = "my-existing-log-bucket"
+  }
+
+  assert {
+    condition     = output.flow_logs_bucket == "my-existing-log-bucket"
+    error_message = "Phải dùng đúng bucket được chỉ định"
   }
 }

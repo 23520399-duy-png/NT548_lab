@@ -35,6 +35,8 @@ run "tc01_vpc" {
     public_subnet_cidrs  = ["10.0.1.0/24"]
     private_subnet_cidrs = ["10.0.2.0/24"]
     azs                  = ["us-east-1a", "us-east-1b"]
+    # Ghi rõ để test không bị ảnh hưởng bởi terraform.tfvars của người chạy
+    enable_flow_logs = false
   }
 
   assert {

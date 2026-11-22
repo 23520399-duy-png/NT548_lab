@@ -63,6 +63,18 @@ variable "enable_flow_logs" {
   default     = true
 }
 
+variable "create_flow_logs_bucket" {
+  description = "Terraform tự tạo S3 bucket cho Flow Logs. Để false trên AWS Academy (SCP chặn API S3 mà provider cần) – bucket được tạo bằng scripts/bootstrap-backend.sh"
+  type        = bool
+  default     = false
+}
+
+variable "flow_logs_bucket_name" {
+  description = "Tên S3 bucket có sẵn nhận Flow Logs. Để trống = <project_name>-flowlogs-<account_id>-<aws_region>"
+  type        = string
+  default     = ""
+}
+
 variable "flow_logs_retention_days" {
   description = "Số ngày giữ Flow Logs trong S3 trước khi tự xoá"
   type        = number
