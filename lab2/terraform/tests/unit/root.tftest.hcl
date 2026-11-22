@@ -18,16 +18,16 @@ mock_provider "aws" {
     }
   }
 
-  override_data {
-    target = module.flow_logs_bucket.data.aws_caller_identity.current
-    values = {
+  # Giá trị giả cho data source nằm trong module flow_logs_bucket (module có
+  # count nên override_data theo địa chỉ không áp dụng được trên Terraform)
+  mock_data "aws_caller_identity" {
+    defaults = {
       account_id = "123456789012"
     }
   }
 
-  override_data {
-    target = module.flow_logs_bucket.data.aws_region.current
-    values = {
+  mock_data "aws_region" {
+    defaults = {
       name = "us-east-1"
     }
   }
