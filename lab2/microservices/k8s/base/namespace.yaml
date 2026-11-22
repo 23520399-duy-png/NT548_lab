@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nt548
+  labels:
+    # Bắt buộc mọi pod trong namespace tuân thủ Pod Security Standard "restricted"
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

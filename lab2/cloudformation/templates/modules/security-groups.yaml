@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Module Security Groups - Public EC2 SG (SSH chỉ từ 1 IP), Private EC2 SG (chỉ từ Public EC2 SG)
+
+Parameters:
+  ProjectName:
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  AllowedSshCidr:
+    Type: String
+    Description: IP của bạn dạng x.x.x.x/32
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/(3[0-2]|[12]?\d)$'
+    ConstraintDescription: Phải là CIDR IPv4 hợp lệ (ví dụ 1.2.3.4/32)
+
+# Chặn việc mở SSH ra toàn Internet
+Rules:
+  DenyOpenSsh:
+    Assertions:
+      - Assert: !Not [!Equals [!Ref AllowedSshCidr, "0.0.0.0/0"]]
+        AssertDescription: AllowedSshCidr KHÔNG được là 0.0.0.0/0
+
+Resources:
+  PublicEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-public-ec2-sg"
+      GroupDescription: Public EC2 - SSH only from allowed IP
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSshCidr
+          Description: SSH from allowed IP only
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-ec2-sg"
+
+  PrivateEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-private-ec2-sg"
+      GroupDescription: Private EC2 - SSH/ICMP only from Public EC2 SG
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref PublicEc2SecurityGroup
+          Description: SSH from Public EC2 (bastion) only
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          SourceSecurityGroupId: !Ref PublicEc2SecurityGroup
+          Description: ICMP (ping) from Public EC2 only
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound (via NAT Gateway)
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-ec2-sg"
+
+Outputs:
+  PublicEc2SecurityGroupId:
+    Value: !Ref PublicEc2SecurityGroup
+  PrivateEc2SecurityGroupId:
+    Value: !Ref PrivateEc2SecurityGroup

@@ -1,0 +1,71 @@
+###############################################################################
+# Jenkins Configuration as Code – toàn bộ cấu hình được tạo tự động khi khởi động.
+# Giá trị ${...} lấy từ biến môi trường (file jenkins/.env).
+###############################################################################
+jenkins:
+  systemMessage: "NT548 Lab 02 – CI/CD microservices (Jenkins + SonarQube + Trivy + Kubernetes)"
+  numExecutors: 2
+  mode: NORMAL
+  securityRealm:
+    local:
+      allowsSignup: false
+      users:
+        - id: "${JENKINS_ADMIN_USER}"
+          password: "${JENKINS_ADMIN_PASSWORD}"
+  authorizationStrategy:
+    loggedInUsersCanDoAnything:
+      allowAnonymousRead: false
+
+unclassified:
+  location:
+    url: "http://localhost:8080/"
+  sonarGlobalConfiguration:
+    buildWrapperEnabled: true
+    installations:
+      - name: "sonarqube"
+        serverUrl: "http://sonarqube:9000"
+        credentialsId: "sonarqube-token"
+
+credentials:
+  system:
+    domainCredentials:
+      - credentials:
+          - string:
+              scope: GLOBAL
+              id: "sonarqube-token"
+              description: "Token SonarQube (sinh bởi scripts/setup.sh)"
+              secret: "${SONAR_TOKEN}"
+          - usernamePassword:
+              scope: GLOBAL
+              id: "github-credentials"
+              description: "GitHub PAT để đọc repo private"
+              username: "${GITHUB_USER}"
+              password: "${GITHUB_TOKEN}"
+
+jobs:
+  - script: >
+      pipelineJob('nt548-lab02-microservices') {
+        description('Build - Test - SonarQube - Trivy - Docker - Kubernetes cho 3 microservice của Lab 02')
+        properties {
+          pipelineTriggers {
+            triggers {
+              pollSCM { scmpoll_spec('H/2 * * * *') }
+            }
+          }
+        }
+        definition {
+          cpsScm {
+            scm {
+              git {
+                remote {
+                  url('${GITHUB_REPO_URL}')
+                  credentials('github-credentials')
+                }
+                branch('*/${GITHUB_BRANCH}')
+              }
+            }
+            scriptPath('lab02/microservices/Jenkinsfile')
+            lightweight(true)
+          }
+        }
+      }

@@ -1,0 +1,7 @@
+# Copy thành backend.hcl rồi sửa bucket:  cp backend.hcl.example backend.hcl
+# Bucket được tạo bằng: ./scripts/bootstrap-backend.sh
+bucket       = "nt548-tfstate-<ACCOUNT_ID>-us-east-1"
+key          = "lab02/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true

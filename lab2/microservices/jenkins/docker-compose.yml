@@ -1,0 +1,76 @@
+###############################################################################
+# Hạ tầng CI/CD local cho Câu 3: Jenkins + SonarQube (+ PostgreSQL)
+#   Chạy qua scripts/setup.sh (đúng thứ tự: kind -> SonarQube -> token -> Jenkins)
+# Jenkins:   http://localhost:8080
+# SonarQube: http://localhost:9000
+###############################################################################
+name: nt548-cicd
+
+services:
+  sonar-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sonar
+      POSTGRES_PASSWORD: sonar
+      POSTGRES_DB: sonarqube
+    volumes:
+      - sonar-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sonar -d sonarqube"]
+      interval: 10s
+      retries: 10
+    networks: [cicd]
+    restart: unless-stopped
+
+  sonarqube:
+    image: sonarqube:community
+    depends_on:
+      sonar-db:
+        condition: service_healthy
+    environment:
+      SONAR_JDBC_URL: jdbc:postgresql://sonar-db:5432/sonarqube
+      SONAR_JDBC_USERNAME: sonar
+      SONAR_JDBC_PASSWORD: sonar
+      # Bỏ kiểm tra vm.max_map_count của Elasticsearch (chỉ dùng cho môi trường lab/dev)
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true"
+    ports:
+      - "9000:9000"
+    volumes:
+      - sonar-data:/opt/sonarqube/data
+      - sonar-extensions:/opt/sonarqube/extensions
+      - sonar-logs:/opt/sonarqube/logs
+    networks: [cicd]
+    restart: unless-stopped
+
+  jenkins:
+    build: .
+    image: nt548/jenkins:lab02
+    env_file: .env
+    # Cho user jenkins quyền dùng Docker socket của máy host
+    group_add:
+      - "${DOCKER_GID:-0}"
+    environment:
+      KUBECONFIG: /etc/kubeconfig/config
+    ports:
+      - "8080:8080"
+    volumes:
+      - jenkins-home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./kubeconfig:/etc/kubeconfig/config:ro
+    networks:
+      - cicd
+      - kind # để kubectl gọi được API server của cụm kind (nt548-control-plane:6443)
+    restart: unless-stopped
+
+volumes:
+  sonar-db:
+  sonar-data:
+  sonar-extensions:
+  sonar-logs:
+  jenkins-home:
+
+networks:
+  cicd:
+    name: nt548-cicd
+  kind:
+    external: true

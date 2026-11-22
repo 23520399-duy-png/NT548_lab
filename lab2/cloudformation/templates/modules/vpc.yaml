@@ -1,0 +1,112 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  Module VPC - VPC, Public/Private Subnet, Internet Gateway, Default Security Group
+
+Parameters:
+  ProjectName:
+    Type: String
+  VpcCidr:
+    Type: String
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+    ConstraintDescription: Phải là CIDR hợp lệ, ví dụ 10.0.0.0/16
+  PublicSubnetCidr:
+    Type: String
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+  PrivateSubnetCidr:
+    Type: String
+    AllowedPattern: '^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$'
+
+Resources:
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-subnet-1"
+        - Key: Tier
+          Value: public
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnetCidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-subnet-1"
+        - Key: Tier
+          Value: private
+
+  # CloudFormation không chỉnh sửa trực tiếp được SG "default" do AWS tự sinh,
+  # nên tạo 1 Security Group mặc định cho VPC: chỉ cho traffic nội bộ giữa
+  # các thành viên của chính SG này, không mở port nào ra Internet.
+  DefaultSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub "${ProjectName}-default-sg"
+      GroupDescription: Default SG - only allow traffic between members
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-default-sg"
+
+  DefaultSecurityGroupSelfIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref DefaultSecurityGroup
+      IpProtocol: "-1"
+      SourceSecurityGroupId: !Ref DefaultSecurityGroup
+      Description: Allow all traffic from members of this SG
+
+Outputs:
+  VpcId:
+    Value: !Ref VPC
+  VpcCidr:
+    Value: !GetAtt VPC.CidrBlock
+  AwsDefaultSecurityGroupId:
+    Description: SG "default" do AWS tự tạo kèm VPC
+    Value: !GetAtt VPC.DefaultSecurityGroup
+  DefaultSecurityGroupId:
+    Value: !Ref DefaultSecurityGroup
+  InternetGatewayId:
+    Value: !Ref InternetGateway
+  PublicSubnetId:
+    Value: !Ref PublicSubnet
+  PrivateSubnetId:
+    Value: !Ref PrivateSubnet
+  # Export ID attachment để module khác có thể phụ thuộc (NAT cần IGW đã attach)
+  InternetGatewayAttachmentId:
+    Value: !Ref InternetGatewayAttachment

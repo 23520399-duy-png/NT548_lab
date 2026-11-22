@@ -1,0 +1,20 @@
+# Cụm Kubernetes local bằng kind (Kubernetes IN Docker)
+#  - 1 control-plane + 1 worker
+#  - NodePort 30080 của gateway được map ra http://localhost:30080
+#  - containerd đọc cấu hình registry trong /etc/containerd/certs.d
+#    (setup.sh trỏ localhost:5001 -> container kind-registry)
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: nt548
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+  - role: worker

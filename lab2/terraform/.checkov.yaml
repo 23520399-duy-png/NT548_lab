@@ -1,0 +1,14 @@
+# Cấu hình Checkov cho Lab 02 – Câu 1
+#   checkov -d . --config-file .checkov.yaml   (chạy tại lab02/terraform)
+# Các ngoại lệ được khai báo NGAY TRONG MÃ NGUỒN bằng comment
+#   #checkov:skip=<ID>:<lý do>
+# để người review thấy lý do tại đúng chỗ, không skip hàng loạt ở đây.
+framework:
+  - terraform
+skip-path:
+  - tests/
+  - .terraform/
+download-external-modules: false
+compact: true
+quiet: false
+soft-fail: false        # có 1 check FAILED -> exit code 1 -> pipeline dừng

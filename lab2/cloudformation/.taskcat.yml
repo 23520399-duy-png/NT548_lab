@@ -1,0 +1,44 @@
+###############################################################################
+# Taskcat – kiểm thử template CloudFormation bằng cách TRIỂN KHAI THẬT
+# rồi tự xoá stack sau khi kiểm tra.
+#   taskcat lint            # kiểm tra cấu hình + cfn-lint (không tốn tiền)
+#   taskcat test run        # tạo stack thật trong các region bên dưới rồi xoá
+# Taskcat upload toàn bộ thư mục dự án lên bucket tự tạo ($[taskcat_autobucket])
+# vào prefix <project-name>/  -> template con nằm ở
+#   s3://<bucket>/nt548-lab02-cfn/templates/modules/*.yaml
+###############################################################################
+project:
+  name: nt548-lab02-cfn
+  regions:
+    - us-east-1
+  # AWS Academy: không cho tạo IAM role -> dùng quyền của LabRole đang chạy
+  parameters:
+    TemplatesBucketName: $[taskcat_autobucket]
+    TemplatesKeyPrefix: $[taskcat_project_name]/templates/
+    KeyName: vockey
+    IamInstanceProfile: LabInstanceProfile
+  tags:
+    Course: NT548
+    Lab: lab02
+    ManagedBy: taskcat
+
+tests:
+  # Test 1: cấu hình mặc định (t3.micro) – kiểm tra toàn bộ nested stack tạo được
+  default:
+    template: templates/main.yaml
+    parameters:
+      ProjectName: tcat-lab02-default
+      # IP thuộc dải TEST-NET-3 (RFC 5737) – chỉ để kiểm thử, không ai SSH được
+      AllowedSshCidr: 203.0.113.10/32
+      InstanceType: t3.micro
+
+  # Test 2: dải mạng và loại instance khác – chứng minh template tham số hoá đúng
+  custom-network:
+    template: templates/main.yaml
+    parameters:
+      ProjectName: tcat-lab02-custom
+      AllowedSshCidr: 198.51.100.20/32
+      VpcCidr: 10.30.0.0/16
+      PublicSubnetCidr: 10.30.1.0/24
+      PrivateSubnetCidr: 10.30.2.0/24
+      InstanceType: t2.micro

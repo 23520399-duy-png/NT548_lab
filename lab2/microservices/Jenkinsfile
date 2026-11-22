@@ -1,0 +1,264 @@
+// =============================================================================
+// NT548 Lab 02 – Câu 3: CI/CD cho ứng dụng microservices bằng Jenkins
+//
+//   Checkout -> Unit test (song song) -> SonarQube + Quality Gate
+//   -> Trivy quét mã nguồn -> Build Docker image (song song)
+//   -> Trivy quét image -> Push registry -> Deploy Kubernetes -> Smoke test
+//
+// Chạy trên Jenkins dựng bởi lab02/microservices/jenkins/scripts/setup.sh
+// (đã có sẵn docker, kubectl, trivy, sonar-scanner, python3, node).
+// =============================================================================
+pipeline {
+    agent any
+
+    options {
+        timestamps()
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    parameters {
+        booleanParam(name: 'ENFORCE_TRIVY_GATE', defaultValue: true,
+                     description: 'Dừng pipeline nếu image có lỗ hổng CRITICAL đã có bản vá')
+        booleanParam(name: 'DEPLOY', defaultValue: true,
+                     description: 'Deploy lên Kubernetes sau khi build')
+    }
+
+    environment {
+        APP_DIR      = 'lab02/microservices'
+        REGISTRY     = 'localhost:5001'
+        IMAGE_PREFIX = 'nt548'
+        K8S_NS       = 'nt548'
+        // Gateway NodePort, gọi từ container Jenkins qua mạng "kind"
+        SMOKE_URL    = 'http://nt548-control-plane:30080'
+        SERVICES     = 'product-service order-service gateway'
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                script {
+                    env.GIT_SHORT = sh(script: 'git rev-parse --short=7 HEAD', returnStdout: true).trim()
+                    env.IMAGE_TAG = "${env.BUILD_NUMBER}-${env.GIT_SHORT}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} (${env.GIT_SHORT})"
+                }
+                sh 'mkdir -p "$APP_DIR/reports"'
+                echo "Image tag: ${env.IMAGE_TAG}"
+            }
+        }
+
+        stage('Unit test') {
+            parallel {
+                stage('product-service · pytest') {
+                    steps {
+                        dir("${APP_DIR}/services/product-service") {
+                            sh '''
+                                python3 -m venv .venv
+                                . .venv/bin/activate
+                                pip install --quiet --disable-pip-version-check -r requirements-dev.txt
+                                pytest
+                            '''
+                        }
+                    }
+                    post {
+                        always { junit allowEmptyResults: true, testResults: "${APP_DIR}/services/product-service/reports/junit.xml" }
+                    }
+                }
+                stage('order-service · jest') {
+                    steps {
+                        dir("${APP_DIR}/services/order-service") {
+                            sh '''
+                                npm ci --no-audit --no-fund
+                                npm test
+                            '''
+                        }
+                    }
+                    post {
+                        always { junit allowEmptyResults: true, testResults: "${APP_DIR}/services/order-service/reports/junit.xml" }
+                    }
+                }
+            }
+        }
+
+        stage('SonarQube analysis') {
+            steps {
+                dir(APP_DIR) {
+                    withSonarQubeEnv('sonarqube') {
+                        sh 'sonar-scanner -Dsonar.projectVersion="$IMAGE_TAG"'
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                // SonarQube gọi webhook http://jenkins:8080/sonarqube-webhook/ khi phân tích xong
+                timeout(time: 10, unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Trivy · quét mã nguồn') {
+            steps {
+                dir(APP_DIR) {
+                    // Lỗ hổng thư viện (package-lock.json, requirements.txt), secret bị lộ,
+                    // cấu hình sai trong Dockerfile và manifest Kubernetes
+                    sh '''
+                        trivy fs --quiet --scanners vuln,secret,misconfig \
+                          --skip-dirs services/order-service/node_modules \
+                          --skip-dirs services/product-service/.venv \
+                          --severity HIGH,CRITICAL \
+                          --format table --output reports/trivy-fs.txt .
+                        trivy fs --quiet --scanners vuln,secret,misconfig \
+                          --skip-dirs services/order-service/node_modules \
+                          --skip-dirs services/product-service/.venv \
+                          --format template --template "@/opt/trivy/contrib/html.tpl" \
+                          --output reports/trivy-fs.html .
+                        cat reports/trivy-fs.txt
+                        # Cổng bắt buộc: không được lộ secret trong mã nguồn
+                        trivy fs --quiet --scanners secret --exit-code 1 \
+                          --skip-dirs services/order-service/node_modules \
+                          --skip-dirs services/product-service/.venv .
+                    '''
+                }
+            }
+        }
+
+        stage('Build Docker images') {
+            steps {
+                script {
+                    def builds = [:]
+                    env.SERVICES.split().each { svc ->
+                        builds[svc] = {
+                            dir("${env.APP_DIR}/services/${svc}") {
+                                sh """
+                                    docker build --pull \
+                                      --label org.opencontainers.image.revision=${env.GIT_COMMIT} \
+                                      --label org.opencontainers.image.version=${env.IMAGE_TAG} \
+                                      -t ${env.REGISTRY}/${env.IMAGE_PREFIX}/${svc}:${env.IMAGE_TAG} \
+                                      -t ${env.REGISTRY}/${env.IMAGE_PREFIX}/${svc}:latest .
+                                """
+                            }
+                        }
+                    }
+                    parallel builds
+                }
+            }
+        }
+
+        stage('Trivy · quét image') {
+            steps {
+                script {
+                    def failed = []
+                    env.SERVICES.split().each { svc ->
+                        def image = "${env.REGISTRY}/${env.IMAGE_PREFIX}/${svc}:${env.IMAGE_TAG}"
+                        dir(env.APP_DIR) {
+                            sh """
+                                trivy image --quiet --severity HIGH,CRITICAL \
+                                  --format table --output reports/trivy-${svc}.txt ${image}
+                                trivy image --quiet \
+                                  --format template --template "@/opt/trivy/contrib/html.tpl" \
+                                  --output reports/trivy-${svc}.html ${image}
+                                cat reports/trivy-${svc}.txt
+                            """
+                            // Cổng chất lượng: CRITICAL đã có bản vá -> fail
+                            def rc = sh(returnStatus: true, script: """
+                                trivy image --quiet --severity CRITICAL --ignore-unfixed \
+                                  --exit-code 1 --format table ${image} > /dev/null
+                            """)
+                            if (rc != 0) { failed << svc }
+                        }
+                    }
+                    if (failed) {
+                        def msg = "Image có lỗ hổng CRITICAL: ${failed.join(', ')}"
+                        if (params.ENFORCE_TRIVY_GATE) { error(msg) } else { unstable(msg) }
+                    }
+                }
+            }
+        }
+
+        stage('Push images') {
+            steps {
+                script {
+                    env.SERVICES.split().each { svc ->
+                        sh """
+                            docker push ${env.REGISTRY}/${env.IMAGE_PREFIX}/${svc}:${env.IMAGE_TAG}
+                            docker push ${env.REGISTRY}/${env.IMAGE_PREFIX}/${svc}:latest
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            when { expression { params.DEPLOY } }
+            steps {
+                dir(APP_DIR) {
+                    // Overlay sinh lúc build: dùng base (đã trỏ image về registry) + gắn tag của build này
+                    sh '''
+                        mkdir -p build/k8s
+                        cat > build/k8s/kustomization.yaml <<EOF
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../k8s/base
+images:
+  - name: ${REGISTRY}/${IMAGE_PREFIX}/product-service
+    newTag: "${IMAGE_TAG}"
+  - name: ${REGISTRY}/${IMAGE_PREFIX}/order-service
+    newTag: "${IMAGE_TAG}"
+  - name: ${REGISTRY}/${IMAGE_PREFIX}/gateway
+    newTag: "${IMAGE_TAG}"
+EOF
+                        kubectl kustomize build/k8s > reports/k8s-manifest.yaml
+                        kubectl apply -k build/k8s
+                        for d in product-service order-service gateway; do
+                          kubectl -n "$K8S_NS" rollout status deployment/$d --timeout=180s
+                        done
+                        kubectl -n "$K8S_NS" get deploy,pods,svc -o wide
+                    '''
+                }
+            }
+        }
+
+        stage('Smoke test') {
+            when { expression { params.DEPLOY } }
+            steps {
+                sh '''
+                    set -e
+                    curl -fsS --retry 10 --retry-delay 3 --retry-all-errors "$SMOKE_URL/health"; echo
+                    curl -fsS "$SMOKE_URL/api/products" | tee /tmp/products.json; echo
+                    test "$(jq 'length' /tmp/products.json)" -ge 1
+                    curl -fsS -X POST -H 'Content-Type: application/json' \
+                      -d '{"productId":1,"quantity":1}' "$SMOKE_URL/api/orders"; echo
+                    curl -fsS "$SMOKE_URL/api/orders" | jq -e 'length >= 1' > /dev/null
+                    echo "Smoke test PASS – mở http://localhost:30080 để xem ứng dụng"
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts allowEmptyArchive: true, artifacts: "${APP_DIR}/reports/**"
+            publishHTML(target: [
+                reportName : 'Trivy reports',
+                reportDir  : "${APP_DIR}/reports",
+                reportFiles: 'trivy-fs.html,trivy-product-service.html,trivy-order-service.html,trivy-gateway.html',
+                keepAll    : true,
+                alwaysLinkToLastBuild: true,
+                allowMissing: true
+            ])
+        }
+        failure {
+            sh 'kubectl -n "$K8S_NS" get events --sort-by=.lastTimestamp 2>/dev/null | tail -20 || true'
+        }
+        cleanup {
+            // Dọn image cũ trên máy host để không đầy ổ đĩa
+            sh 'docker image prune -f --filter "label=org.opencontainers.image.version" --filter "until=24h" || true'
+        }
+    }
+}

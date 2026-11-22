@@ -1,0 +1,363 @@
+###############################################################################
+# NT548 Lab 02 – Câu 1: Terraform + GitHub Actions + Checkov
+#
+# Luồng chạy:
+#   Pull Request  : validate -> checkov -> plan (comment kết quả plan lên PR)
+#   Push main     : validate -> checkov -> plan -> apply
+#   Run workflow  : chọn plan / apply / destroy bằng tay (workflow_dispatch)
+#
+# GitHub Secrets cần có (Settings > Secrets and variables > Actions):
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+#       -> copy từ AWS Academy > AWS Details > AWS CLI (hết hạn sau ~4 giờ,
+#          mỗi lần Start Lab phải cập nhật lại)
+#   ALLOWED_SSH_CIDR   -> IP của bạn dạng x.x.x.x/32
+# GitHub Variables:
+#   TF_STATE_BUCKET    -> bucket do scripts/bootstrap-backend.sh tạo
+#   AWS_REGION         -> (tuỳ chọn) mặc định us-east-1
+###############################################################################
+name: "Lab02 - Terraform CI/CD"
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "lab2/terraform/**"
+      - ".github/workflows/lab02-terraform.yml"
+  push:
+    branches: [main]
+    paths:
+      - "lab2/terraform/**"
+      - ".github/workflows/lab02-terraform.yml"
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Hành động Terraform"
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+permissions:
+  contents: read
+
+# Không cho 2 lần chạy cùng sửa 1 state
+concurrency:
+  group: lab02-terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: "~1.13.0"
+  TF_DIR: lab2/terraform
+  AWS_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+
+jobs:
+  # --------------------------------------------------------------------------
+  # 1. Kiểm tra tĩnh + unit test (OFFLINE, không cần AWS credentials)
+  # --------------------------------------------------------------------------
+  validate:
+    name: fmt / validate / unit test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff
+
+      - name: terraform init (không backend)
+        run: terraform init -backend=false -test-directory=tests/unit
+
+      - name: terraform validate
+        run: terraform validate -no-color
+
+      - name: terraform test (unit, mock provider)
+        run: terraform test -test-directory=tests/unit -no-color
+
+  # --------------------------------------------------------------------------
+  # 2. Checkov: kiểm tra bảo mật & tuân thủ (CIS AWS, best practice)
+  #    Có check FAILED -> job đỏ -> plan/apply không chạy.
+  # --------------------------------------------------------------------------
+  checkov:
+    name: Checkov security scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Checkov
+        id: checkov
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: ${{ env.TF_DIR }}
+          config_file: ${{ env.TF_DIR }}/.checkov.yaml
+          framework: terraform
+          output_format: cli,sarif,junitxml
+          output_file_path: console,checkov-results.sarif,checkov-results.xml
+          soft_fail: false
+
+      - name: Upload báo cáo Checkov
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: checkov-report
+          path: |
+            checkov-results.sarif
+            checkov-results.xml
+          retention-days: 14
+
+      # Code scanning (tab Security) chỉ miễn phí với repo PUBLIC.
+      - name: Upload SARIF lên GitHub Code Scanning (repo public)
+        if: always() && github.event.repository.private == false
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: checkov-results.sarif
+          category: checkov-lab02
+
+  # --------------------------------------------------------------------------
+  # 3. Kiểm tra đã cấu hình AWS credentials chưa
+  # --------------------------------------------------------------------------
+  precheck:
+    name: Kiểm tra secrets
+    runs-on: ubuntu-latest
+    outputs:
+      has_aws: ${{ steps.check.outputs.has_aws }}
+    steps:
+      - id: check
+        env:
+          KEY: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
+          BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          SSH_CIDR: ${{ secrets.ALLOWED_SSH_CIDR }}
+        run: |
+          if [[ -n "$KEY" && -n "$TOKEN" && -n "$BUCKET" && -n "$SSH_CIDR" ]]; then
+            echo "has_aws=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_aws=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Chưa cấu hình AWS secrets/TF_STATE_BUCKET -> bỏ qua plan/apply"
+          fi
+
+  # --------------------------------------------------------------------------
+  # 4. terraform plan
+  # --------------------------------------------------------------------------
+  plan:
+    name: terraform plan
+    needs: [validate, checkov, precheck]
+    if: >-
+      needs.precheck.outputs.has_aws == 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.action != 'destroy')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    env:
+      TF_VAR_allowed_ssh_cidr: ${{ secrets.ALLOWED_SSH_CIDR }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: Cấu hình AWS credentials (AWS Academy)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Kiểm tra credentials còn hạn
+        run: aws sts get-caller-identity --query Arn --output text
+
+      - name: terraform init (backend S3)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lab2/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set -o pipefail
+          terraform plan -out=tfplan -no-color -detailed-exitcode | tee plan.txt || ec=$?
+          ec=${ec:-0}
+          # 0 = không thay đổi, 2 = có thay đổi, 1 = lỗi
+          if [[ "$ec" == "1" ]]; then exit 1; fi
+          echo "changes=$([[ "$ec" == "2" ]] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+      - name: Ghi tóm tắt plan
+        run: |
+          {
+            echo "## Terraform plan – lab02"
+            echo '```'
+            grep -E '^(Plan:|No changes)' plan.txt || true
+            echo '```'
+            echo "<details><summary>Chi tiết plan</summary>"
+            echo
+            echo '```hcl'
+            tail -c 60000 plan.txt
+            echo '```'
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment plan lên Pull Request
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const plan = fs.readFileSync('${{ env.TF_DIR }}/plan.txt', 'utf8');
+            const summary = (plan.match(/^(Plan:.*|No changes.*)$/m) || ['(không đọc được)'])[0];
+            const body = [
+              '### Terraform plan – lab02',
+              `**${summary}**`,
+              '<details><summary>Chi tiết</summary>',
+              '',
+              '```hcl',
+              plan.slice(-60000),
+              '```',
+              '</details>',
+              `_Workflow: [${context.runId}](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})_`
+            ].join('\n');
+            await github.rest.issues.createComment({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: context.issue.number, body
+            });
+
+      # Plan file chứa giá trị biến -> chỉ giữ 1 ngày
+      - name: Lưu plan cho job apply
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            ${{ env.TF_DIR }}/tfplan
+            ${{ env.TF_DIR }}/.terraform.lock.hcl
+          include-hidden-files: true
+          retention-days: 1
+
+  # --------------------------------------------------------------------------
+  # 5. terraform apply – chỉ khi push lên main hoặc chọn "apply" bằng tay.
+  #    Environment "aws-academy" có thể bật Required reviewers để duyệt tay.
+  # --------------------------------------------------------------------------
+  apply:
+    name: terraform apply
+    needs: plan
+    if: >-
+      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
+    runs-on: ubuntu-latest
+    environment: aws-academy
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Tải plan từ job trước
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_DIR }}
+
+      - name: terraform init (backend S3)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lab2/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: terraform apply (đúng plan đã review)
+        run: terraform apply -no-color tfplan
+
+      - name: Kiểm tra nhanh hạ tầng sau khi deploy
+        run: |
+          set -euo pipefail
+          VPC=$(terraform output -raw vpc_id)
+          NAT=$(terraform output -raw nat_gateway_id)
+          PUB=$(terraform output -raw public_instance_id)
+          PRI=$(terraform output -raw private_instance_id)
+          aws ec2 wait instance-running --instance-ids "$PUB" "$PRI"
+          echo "VPC:  $(aws ec2 describe-vpcs --vpc-ids "$VPC" --query 'Vpcs[0].State' --output text)"
+          echo "NAT:  $(aws ec2 describe-nat-gateways --nat-gateway-ids "$NAT" --query 'NatGateways[0].State' --output text)"
+          echo "Flow: $(aws ec2 describe-flow-logs --filter Name=resource-id,Values="$VPC" --query 'FlowLogs[0].FlowLogStatus' --output text)"
+          PRI_PUBIP=$(aws ec2 describe-instances --instance-ids "$PRI" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text)
+          [[ "$PRI_PUBIP" == "None" ]] || { echo "Private EC2 không được có Public IP"; exit 1; }
+          {
+            echo "## Hạ tầng đã triển khai"
+            echo '```'
+            terraform output
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # 6. terraform destroy – chỉ chạy bằng tay (tránh tốn phí NAT Gateway)
+  # --------------------------------------------------------------------------
+  destroy:
+    name: terraform destroy
+    needs: [precheck]
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.action == 'destroy' &&
+      needs.precheck.outputs.has_aws == 'true'
+    runs-on: ubuntu-latest
+    environment: aws-academy
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    env:
+      TF_VAR_allowed_ssh_cidr: ${{ secrets.ALLOWED_SSH_CIDR }}
+      TF_VAR_aws_region: ${{ vars.AWS_REGION || 'us-east-1' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: terraform init (backend S3)
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="key=lab2/terraform.tfstate" \
+            -backend-config="region=${AWS_REGION}" \
+            -backend-config="encrypt=true" \
+            -backend-config="use_lockfile=true"
+
+      - name: terraform destroy
+        run: terraform destroy -auto-approve -no-color

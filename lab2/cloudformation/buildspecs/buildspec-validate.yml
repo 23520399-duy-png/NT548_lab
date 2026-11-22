@@ -1,0 +1,74 @@
+###############################################################################
+# CodeBuild – Stage "Validate"
+#   1. cfn-lint toàn bộ template (xuất báo cáo JUnit lên CodeBuild Reports)
+#   2. aws cloudformation validate-template
+#   3. Upload template con lên S3 (prefix = commit ID) để nested stack đọc
+#   4. Sinh build/config.json (tham số cho bước Deploy của CodePipeline)
+# Biến môi trường (khai báo trong CodeBuild project – pipeline/pipeline.yaml):
+#   TEMPLATES_BUCKET, ALLOWED_SSH_CIDR, KEY_NAME, INSTANCE_PROFILE, PROJECT_NAME
+###############################################################################
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    CFN_LINT_VERSION: "1.*"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - pip install --quiet "cfn-lint==${CFN_LINT_VERSION}"
+      - cfn-lint --version
+
+  build:
+    commands:
+      - mkdir -p reports build
+      - echo "===== [1] cfn-lint ====="
+      # Xuất JUnit cho tab Reports, sau đó chạy lại dạng dễ đọc để fail build nếu có lỗi
+      - cfn-lint --format junit > reports/cfn-lint.xml || true
+      - cfn-lint
+      - echo "===== [2] validate-template ====="
+      - |
+        for f in templates/main.yaml templates/modules/*.yaml; do
+          aws cloudformation validate-template --template-body "file://$f" > /dev/null || exit 1
+          echo "  OK  $f"
+        done
+      - echo "===== [3] Upload template con lên S3 ====="
+      - COMMIT="${CODEBUILD_RESOLVED_SOURCE_VERSION:-manual}"
+      - PREFIX="templates/${COMMIT:0:12}/"
+      - aws s3 sync templates/ "s3://${TEMPLATES_BUCKET}/${PREFIX}" --delete --only-show-errors
+      - echo "  s3://${TEMPLATES_BUCKET}/${PREFIX}"
+      - echo "===== [4] Sinh build/config.json cho bước Deploy ====="
+      - |
+        cat > build/config.json <<JSON
+        {
+          "Parameters": {
+            "TemplatesBucketName": "${TEMPLATES_BUCKET}",
+            "TemplatesKeyPrefix": "${PREFIX}",
+            "ProjectName": "${PROJECT_NAME}",
+            "AllowedSshCidr": "${ALLOWED_SSH_CIDR}",
+            "KeyName": "${KEY_NAME}",
+            "IamInstanceProfile": "${INSTANCE_PROFILE}"
+          },
+          "Tags": {
+            "Course": "NT548",
+            "Lab": "lab02",
+            "ManagedBy": "CodePipeline",
+            "Commit": "${COMMIT:0:12}"
+          }
+        }
+        JSON
+      - cat build/config.json
+
+reports:
+  cfn-lint:
+    files:
+      - reports/cfn-lint.xml
+    file-format: JUNITXML
+
+artifacts:
+  files:
+    - templates/**/*
+    - build/config.json

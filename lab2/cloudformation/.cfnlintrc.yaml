@@ -1,0 +1,8 @@
+# Cấu hình cfn-lint cho Lab 02 – Câu 2
+#   cfn-lint            (đọc file này, lint toàn bộ template)
+templates:
+  - templates/main.yaml
+  - templates/modules/*.yaml
+  - pipeline/*.yaml
+include_checks:
+  - I        # bật thêm các rule Informational

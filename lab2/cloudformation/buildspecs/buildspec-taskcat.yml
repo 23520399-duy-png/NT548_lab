@@ -1,0 +1,41 @@
+###############################################################################
+# CodeBuild – Stage "Test"
+#   taskcat test run: triển khai THẬT template trong us-east-1 theo các test
+#   trong .taskcat.yml, kiểm tra stack CREATE_COMPLETE rồi tự xoá.
+# Đặt RUN_TASKCAT=false (biến của CodeBuild project) để bỏ qua khi muốn
+# tiết kiệm thời gian/chi phí (NAT Gateway tính tiền theo giờ).
+###############################################################################
+version: 0.2
+
+env:
+  shell: bash
+  variables:
+    RUN_TASKCAT: "true"
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.12
+    commands:
+      - python -m venv /tmp/taskcat
+      - /tmp/taskcat/bin/pip install --quiet "taskcat==0.9.*" "setuptools<81"
+      - /tmp/taskcat/bin/taskcat --version
+
+  build:
+    commands:
+      - |
+        if [ "${RUN_TASKCAT}" != "true" ]; then
+          echo "RUN_TASKCAT=${RUN_TASKCAT} -> bỏ qua taskcat test run"
+          mkdir -p taskcat_outputs && echo "skipped" > taskcat_outputs/SKIPPED.txt
+        else
+          echo "===== taskcat lint =====" &&
+          /tmp/taskcat/bin/taskcat lint &&
+          echo "===== taskcat test run (tạo stack thật -> kiểm tra -> xoá) =====" &&
+          /tmp/taskcat/bin/taskcat test run --output-directory taskcat_outputs
+        fi
+
+artifacts:
+  name: taskcat-report
+  base-directory: taskcat_outputs
+  files:
+    - "**/*"

@@ -1,0 +1,32 @@
+# Chạy nhanh 3 microservice bằng Docker Compose (không cần Kubernetes/Jenkins)
+#   docker compose up -d --build      -> http://localhost:8081
+#   docker compose down
+name: nt548-lab02-app
+
+services:
+  product-service:
+    build: ./services/product-service
+    image: nt548/product-service:dev
+    restart: unless-stopped
+
+  order-service:
+    build: ./services/order-service
+    image: nt548/order-service:dev
+    environment:
+      PRODUCT_SERVICE_URL: http://product-service:8000
+    depends_on:
+      product-service:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gateway:
+    build: ./services/gateway
+    image: nt548/gateway:dev
+    ports:
+      - "8081:8080"
+    depends_on:
+      product-service:
+        condition: service_healthy
+      order-service:
+        condition: service_healthy
+    restart: unless-stopped
