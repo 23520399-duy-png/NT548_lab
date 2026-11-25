@@ -88,6 +88,10 @@ jobs:
   checkov:
     name: Checkov security scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # upload SARIF lên tab Security (repo public)
+      actions: read
     steps:
       - uses: actions/checkout@v4
 
